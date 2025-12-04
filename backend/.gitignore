@@ -1,0 +1,36 @@
+# Python 가상환경
+.venv/
+venv/
+ENV/
+env/
+
+# PyCache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 모델 파일
+models/*.pkl
+models/*.joblib
+
+# 환경변수
+.env
+
+# 로그/출력 파일
+*.log
+*.out
+*.tmp
+
+# 데이터 파일
+data/
+*.csv
+*.xlsx
+
+# IDE/툴 설정
+.vscode/
+.idea/
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db

@@ -1,0 +1,241 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+// [변경] 클래스 이름: HeartRateTestPage -> CardioEnduranceTestPage
+class CardioEnduranceTestPage extends StatefulWidget {
+  const CardioEnduranceTestPage({super.key});
+
+  @override
+  State<CardioEnduranceTestPage> createState() =>
+      _CardioEnduranceTestPageState();
+}
+
+class _CardioEnduranceTestPageState extends State<CardioEnduranceTestPage> {
+  static const int _initialTime = 5; // 개발용 5초 (원래 60초)
+
+  int _secondsRemaining = _initialTime;
+  Timer? _timer;
+  bool _isTimerRunning = false;
+  bool _isTimerCompleted = false;
+
+  // 카운트다운 관련
+  bool _isCountdownActive = false;
+  int _countdownValue = 3; // 3, 2, 1
+
+  final TextEditingController _countController = TextEditingController();
+
+  void _startCountdown() {
+    setState(() {
+      _isCountdownActive = true;
+      _countdownValue = 3;
+    });
+
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      setState(() {
+        if (_countdownValue > 1) {
+          _countdownValue--;
+        } else {
+          timer.cancel();
+          _isCountdownActive = false;
+          _startMainTimer(); // 카운트다운 끝나면 실제 타이머 시작
+        }
+      });
+    });
+  }
+
+  void _startMainTimer() {
+    setState(() {
+      _isTimerRunning = true;
+    });
+
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_secondsRemaining > 0) {
+        setState(() {
+          _secondsRemaining--;
+        });
+      } else {
+        _timer?.cancel();
+        setState(() {
+          _isTimerRunning = false;
+          _isTimerCompleted = true;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("측정이 종료되었습니다! 심박수를 입력해주세요.")),
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _countController.dispose();
+    super.dispose();
+  }
+
+  String _formatTime(int seconds) {
+    int min = seconds ~/ 60;
+    int sec = seconds % 60;
+    return '${min.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("회복 심박수 (심폐지구력)"),
+        centerTitle: true,
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        elevation: 0,
+      ),
+      backgroundColor: Colors.white,
+      body: Stack(
+        children: [
+          // 메인 화면
+          Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  _formatTime(_secondsRemaining),
+                  style: TextStyle(
+                    fontSize: 80,
+                    fontWeight: FontWeight.bold,
+                    color: _isTimerRunning ? Colors.redAccent : Colors.teal,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 30),
+
+                const Text(
+                  "1분 동안 심박수를 측정한 후\n결과를 입력해주세요.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Colors.black87,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 50),
+
+                if (!_isTimerRunning && !_isTimerCompleted && !_isCountdownActive)
+                  ElevatedButton(
+                    onPressed: _startCountdown, // 카운트다운 시작
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      backgroundColor: Colors.teal,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      "측정 시작",
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  )
+                else if (_isTimerRunning)
+                  Column(
+                    children: [
+                      const LinearProgressIndicator(color: Colors.teal),
+                      const SizedBox(height: 20),
+                      OutlinedButton(
+                        onPressed: () {
+                          _timer?.cancel();
+                          setState(() {
+                            _isTimerRunning = false;
+                            _secondsRemaining = _initialTime;
+                          });
+                        },
+                        child: const Text("중단하고 리셋"),
+                      ),
+                    ],
+                  )
+                else if (_isTimerCompleted)
+                  Column(
+                    children: [
+                      const Text(
+                        "측정 결과 (BPM)",
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _countController,
+                        keyboardType: TextInputType.number,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        decoration: InputDecoration(
+                          hintText: "0",
+                          suffixText: "회/분",
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: 16,
+                            horizontal: 20,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      ElevatedButton(
+                        onPressed: () {
+                          if (_countController.text.isEmpty) return;
+
+                          int? result = int.tryParse(_countController.text);
+                          if (result != null) {
+                            Navigator.pop(context, result);
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(56),
+                          backgroundColor: Colors.blueAccent,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: const Text(
+                          "기록 저장하기",
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+
+          // 카운트다운 오버레이
+          if (_isCountdownActive)
+            Container(
+              color: Colors.black.withOpacity(0.7),
+              child: Center(
+                child: Text(
+                  "$_countdownValue",
+                  style: const TextStyle(
+                    fontSize: 150,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
