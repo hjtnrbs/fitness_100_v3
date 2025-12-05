@@ -1,17 +1,20 @@
 // lib/tabs/map_mission_view.dart
 import 'dart:async';
-import 'dart:math' as math;
+import 'dart:convert';                         // 👈 jsonEncode
 
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:location/location.dart';
-import '../models/facility.dart';   // 🔹 이 줄 추가
 
-import '../services/facility_api.dart'; // FastAPI 연동
-import 'package:url_launcher/url_launcher.dart';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
-import '../config/api_config.dart'; // 이미 있으면 생략
+import '../models/facility.dart';
+import '../services/facility_api.dart';
+import '../screens/mission_route_page.dart';
+
+import 'package:http/http.dart' as http;       // 👈 즐겨찾기 토글용
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../config/api_config.dart';            // apiUri() 사용
+
 
 class MapMissionView extends StatefulWidget {
   const MapMissionView({super.key});
@@ -23,37 +26,40 @@ class MapMissionView extends StatefulWidget {
 class _MapMissionViewState extends State<MapMissionView> {
   NaverMapController? _naverMapController;
   bool _mapReady = false;
-  // 🔹 FastAPI 시설 조회용
+
+  // FastAPI 시설 조회용
   final _facilityApi = FacilityApi();
 
-  // 상태 변수
   bool _loading = true;
   static const NLatLng _defaultCenter = NLatLng(37.5665, 126.9780); // 서울시청
   NLatLng? _userCenter;
   double _radiusKm = 1.0; // 기본 반경 1km
 
-  // 지도 컨트롤러
-  NaverMapController? _mapController;
-  final Completer<NaverMapController> _mapControllerCompleter = Completer();
-
-  // 데이터
-  List<Facility> _facilities = [];
-  Facility? _selected; // 선택된 시설
-
-  // 위치 서비스
   final Location _location = Location();
-  // ✅ 추가: 길찾기 polyline
-  NPathOverlay? _routePath;
+
+  final Completer<NaverMapController> _mapControllerCompleter = Completer();
+  NaverMapController? _mapController;
+
+  List<Facility> _facilities = [];
+  Facility? _selected;
+
+  // ⭐ 즐겨찾기 (facility_id 집합)
+  final Set<int> _favoriteIds = {};
 
   @override
   void initState() {
     super.initState();
-    _initLocationAndLoad();
+    _init();                              // 👈 한 번에 초기화
+  }
+
+  Future<void> _init() async {
+    await _initLocationAndLoad();         // 위치 + 시설 불러오기
+    await _loadUserFavorites();           // 로그인 유저 즐겨찾기 불러오기
   }
 
   NLatLng get _mapCenter => _userCenter ?? _defaultCenter;
 
-  // 1. 위치 권한 및 현재 위치 가져오기
+  /// 1. 위치 권한 및 현재 위치 가져오기 + 시설 로딩
   Future<void> _initLocationAndLoad() async {
     try {
       bool serviceEnabled;
@@ -81,7 +87,8 @@ class _MapMissionViewState extends State<MapMissionView> {
 
       final locationData = await _location.getLocation();
       if (locationData.latitude != null && locationData.longitude != null) {
-        _userCenter = NLatLng(locationData.latitude!, locationData.longitude!);
+        _userCenter =
+            NLatLng(locationData.latitude!, locationData.longitude!);
       } else {
         _userCenter = _defaultCenter;
       }
@@ -94,16 +101,15 @@ class _MapMissionViewState extends State<MapMissionView> {
     }
   }
 
-  // 2. FastAPI에서 시설 데이터 가져오기
+  /// 2. FastAPI에서 시설 데이터 가져오기
   Future<void> _loadFacilities() async {
     setState(() => _loading = true);
 
     try {
       final center = _mapCenter;
+      debugPrint(
+          '[MAP] loadFacilities center=${center.latitude},${center.longitude} radius=$_radiusKm');
 
-      print('[MAP] loadFacilities center=${center.latitude},${center.longitude} radius=$_radiusKm');
-
-      // ✅ 슬라이더 값(_radiusKm) 그대로 사용
       final facilities = await _facilityApi.getNearFacilities(
         lat: center.latitude,
         lon: center.longitude,
@@ -114,12 +120,11 @@ class _MapMissionViewState extends State<MapMissionView> {
 
       setState(() {
         _facilities = facilities;
-        // ✅ 여기에서 _radiusKm를 10.0 같은 값으로 덮어쓰지 않는다
       });
 
       await _renderOverlays();
     } catch (e) {
-      print('[MAP] 시설 로딩 오류: $e');
+      debugPrint('[MAP] 시설 로딩 오류: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('시설 정보를 불러오지 못했어요: $e')),
@@ -130,65 +135,104 @@ class _MapMissionViewState extends State<MapMissionView> {
     }
   }
 
-  // 네이버 Directions를 FastAPI를 통해 호출해서
-  // 내 위치 -> 시설까지 도로 경로 polyline 생성
-  Future<void> _loadRoute(Facility facility) async {
-    // 시작점: 사용자 위치 없으면 현재 지도 중심
-    final start = _userCenter ?? _mapCenter;
+  /// 👇 로그인 유저의 즐겨찾기 목록 불러오기 (/favorites/by-user)
+  Future<void> _loadUserFavorites() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
 
     try {
-      final uri = apiUri('/route', {
-        'start_lat': start.latitude.toString(),
-        'start_lon': start.longitude.toString(),
-        'end_lat': facility.lat.toString(),
-        'end_lon': facility.lon.toString(),
-      });
-
+      final uri = apiUri(
+        '/favorites/by-user',
+        {'user_id': user.id},
+      );
       final resp = await http.get(uri);
+
       if (resp.statusCode != 200) {
-        throw Exception('경로 API 실패: ${resp.statusCode} ${resp.body}');
+        debugPrint('[MAP] 즐겨찾기 조회 실패: ${resp.statusCode} ${resp.body}');
+        return;
       }
 
-      final data = json.decode(resp.body) as Map<String, dynamic>;
-      final List<dynamic> path = data['path'] as List<dynamic>;
-
-      // [[lon,lat], ...] → List<NLatLng>
-      final coords = path
-          .map<NLatLng>((p) => NLatLng(
-                (p[1] as num).toDouble(),
-                (p[0] as num).toDouble(),
-              ))
-          .toList();
-
-      final routeOverlay = NPathOverlay(
-        id: 'naver_route',
-        coords: coords,
-        width: 6,
-        color: const Color.fromARGB(220, 0, 150, 136),
-      );
+      final List data = jsonDecode(resp.body);
+      final ids = <int>{};
+      for (final item in data) {
+        if (item is Map && item['id'] != null) {
+          ids.add(item['id'] as int);
+        }
+      }
 
       if (!mounted) return;
       setState(() {
-        _routePath = routeOverlay;
+        _favoriteIds
+          ..clear()
+          ..addAll(ids);
+      });
+    } catch (e) {
+      debugPrint('[MAP] 즐겨찾기 조회 예외: $e');
+    }
+  }
+
+  /// 👇 즐겨찾기 토글 (/favorites/toggle)
+  Future<void> _toggleFavorite(Facility f) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('로그인이 필요합니다.')),
+      );
+      return;
+    }
+
+    final nowFav = _favoriteIds.contains(f.id);
+    final newFav = !nowFav;
+
+    // 1) 먼저 UI 상태 변경
+    setState(() {
+      if (newFav) {
+        _favoriteIds.add(f.id);
+      } else {
+        _favoriteIds.remove(f.id);
+      }
+    });
+
+    // 2) 백엔드에 반영
+    try {
+      final uri = apiUri('/favorites/toggle');
+      final body = jsonEncode({
+        'user_id': user.id,
+        'facility_id': f.id,
+        'is_favorite': newFav,
       });
 
-      await _renderOverlays();
+      final resp = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: body,
+      );
+
+      if (resp.statusCode != 200) {
+        throw Exception('status=${resp.statusCode}, body=${resp.body}');
+      }
     } catch (e) {
-      if (!mounted) return;
+      // 실패하면 UI 롤백
+      setState(() {
+        if (nowFav) {
+          _favoriteIds.add(f.id);
+        } else {
+          _favoriteIds.remove(f.id);
+        }
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('경로 정보를 불러오지 못했어요: $e')),
+        SnackBar(content: Text('즐겨찾기 저장 실패: $e')),
       );
     }
   }
 
-
-  // 3. 지도에 마커 및 반경 원 그리기
+  /// 3. 지도에 마커/반경만 렌더링 (경로는 X)
   Future<void> _renderOverlays() async {
-    if (!_mapReady) return;
+    if (!_mapReady || _naverMapController == null) return;
 
     final overlays = <NAddableOverlay<NOverlay<void>>>{};
 
-    // 1) 반경 원
+    // 반경 원
     final circle = NCircleOverlay(
       id: 'radius_circle',
       center: _mapCenter,
@@ -199,7 +243,7 @@ class _MapMissionViewState extends State<MapMissionView> {
     );
     overlays.add(circle);
 
-    // 2) 시설 마커들
+    // 시설 마커
     for (final f in _facilities) {
       final marker = NMarker(
         id: 'facility_${f.id}',
@@ -207,111 +251,59 @@ class _MapMissionViewState extends State<MapMissionView> {
         caption: NOverlayCaption(text: f.name),
       );
 
-      // 마커 탭 → 선택 + 경로 로드
       marker.setOnTapListener((overlay) async {
         if (!mounted) return;
 
         setState(() {
           _selected = f;
-          _routePath = null; // 새 경로로 교체 예정
         });
 
-        // 카메라를 선택 시설로 조금 이동
         final cameraUpdate = NCameraUpdate.withParams(
           target: NLatLng(f.lat, f.lon),
           zoom: 15,
         );
         await _naverMapController?.updateCamera(cameraUpdate);
-
-        // 네이버 Directions 호출
-        await _loadRoute(f);
       });
 
       overlays.add(marker);
     }
 
-    // 3) 경로 polyline 있으면 추가
-    if (_routePath != null) {
-      overlays.add(_routePath!);
-    }
+    await _naverMapController!.clearOverlays();
+    await _naverMapController!.addOverlayAll(overlays);
 
-    await _naverMapController?.clearOverlays();
-    await _naverMapController?.addOverlayAll(overlays);
-
-    print('[MAP] renderOverlays radius=$_radiusKm km, markers=${_facilities.length}');
+    debugPrint(
+        '[MAP] renderOverlays radius=$_radiusKm km, markers=${_facilities.length}');
   }
 
+  /// 리스트에서 아이템 탭 → 지도 포커싱만 (경로 X)
+  Future<void> _focusFacility(Facility f) async {
+    if (!_mapReady || _naverMapController == null) return;
 
+    setState(() {
+      _selected = f;
+    });
 
-  // (참고용) 거리 계산 – 지금은 FastAPI가 이미 반경 필터링해줘서 사용 안 함
-  double _distanceKm(double lat1, double lon1, double lat2, double lon2) {
-    const R = 6371.0;
-    final dLat = _degToRad(lat2 - lat1);
-    final dLon = _degToRad(lon2 - lon1);
-    final a =
-        math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(_degToRad(lat1)) *
-            math.cos(_degToRad(lat2)) *
-            math.sin(dLon / 2) *
-            math.sin(dLon / 2);
-    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-    return R * c;
+    final cameraUpdate = NCameraUpdate.withParams(
+      target: NLatLng(f.lat, f.lon),
+      zoom: 15,
+    );
+    await _naverMapController!.updateCamera(cameraUpdate);
   }
 
-  double _degToRad(double v) => v * math.pi / 180.0;
-
-    Future<void> _openRoute() async {
-    if (_selected == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('먼저 지도에서 시설을 선택해 주세요.')),
-      );
-      return;
-    }
-
-    // 출발점: 사용자 위치(없으면 현재 지도 중심)
+  /// 미션 3단계 화면으로 이동 (여기에서만 경로 표시)
+  void _openMissionPage(Facility f) {
     final start = _userCenter ?? _mapCenter;
-    final dest = _selected!;
-    final destName = Uri.encodeComponent(dest.name);
+    final isFav = _favoriteIds.contains(f.id);     // ⭐ 현재 즐겨찾기 여부
 
-    // 🔹 1. 네이버 지도 앱용 딥링크 (도보 길찾기 예시)
-    final naverAppUri = Uri.parse(
-      'nmap://route/walk'
-      '?slat=${start.latitude}&slng=${start.longitude}' // 출발
-      '&dlat=${dest.lat}&dlng=${dest.lon}'              // 도착
-      '&dname=$destName'
-      '&appname=com.example.lowageapp',                // ← 패키지명으로 수정해도 됨
-    );
-
-    // 🔹 2. 앱이 없을 때를 위한 웹 URL (브라우저로 열기)
-    final naverWebUri = Uri.parse(
-      'https://map.naver.com/v5/directions/'
-      '${start.longitude},${start.latitude},출발지,,/'
-      '${dest.lon},${dest.lat},$destName,,',
-    );
-
-    try {
-      if (await canLaunchUrl(naverAppUri)) {
-        await launchUrl(naverAppUri);
-      } else {
-        await launchUrl(
-          naverWebUri,
-          mode: LaunchMode.externalApplication,
-        );
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('경로 안내를 열 수 없어요: $e')),
-      );
-    }
-  }
-
-
-  // 4. 미션 시작 (지금은 라우팅/로그 없이 안내만)
-  void _startMission() {
-    if (_selected == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('미션/경로 안내는 추후 연동 예정입니다.'),
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MissionRoutePage(
+          facility: f,
+          startLat: start.latitude,
+          startLon: start.longitude,
+          isFavorite: isFav,                        // 👈 전달
+        ),
       ),
     );
   }
@@ -332,9 +324,8 @@ class _MapMissionViewState extends State<MapMissionView> {
               consumeSymbolTapEvents: false,
             ),
             onMapReady: (controller) async {
-              _naverMapController = controller;  // ✅ 컨트롤러 저장
-              _mapReady = true;                  // ✅ 준비 완료 표시
-              await _renderOverlays();           // 첫 렌더링
+              _naverMapController = controller;
+              _mapReady = true;
               _mapController = controller;
               if (!_mapControllerCompleter.isCompleted) {
                 _mapControllerCompleter.complete(controller);
@@ -383,15 +374,15 @@ class _MapMissionViewState extends State<MapMissionView> {
                       child: Slider(
                         value: _radiusKm,
                         min: 0.5,
-                        max: 10.0,         // 0.5 ~ 10km
-                        divisions: 19,    // 0.5km 단위
+                        max: 10.0,
+                        divisions: 19,
                         activeColor: Colors.teal,
                         onChanged: (val) {
                           setState(() => _radiusKm = val);
-                          _renderOverlays(); // 원 크기 즉시 갱신
+                          _renderOverlays(); // 원 크기 즉시 반영
                         },
                         onChangeEnd: (val) {
-                          _loadFacilities(); // 반경 바뀐 값으로 API 다시 호출
+                          _loadFacilities(); // 반경 값으로 API 다시 호출
                         },
                       ),
                     ),
@@ -404,83 +395,130 @@ class _MapMissionViewState extends State<MapMissionView> {
           // 3. 로딩 인디케이터
           if (_loading) const Center(child: CircularProgressIndicator()),
 
-          // 4. 하단 시설 정보 패널 (마커 선택 시 표시)
-          if (_selected != null)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 30),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(20),
+          // 4. 하단 이지팟 목록 BottomSheet
+          DraggableScrollableSheet(
+            initialChildSize: 0.25,
+            minChildSize: 0.18,
+            maxChildSize: 0.6,
+            builder: (context, scrollController) {
+              if (_facilities.isEmpty) {
+                return Container(
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    borderRadius:
+                        BorderRadius.vertical(top: Radius.circular(16)),
                   ),
+                  child: const Center(
+                    child: Text('반경 내 이지팟 미션이 없습니다.'),
+                  ),
+                );
+              }
+
+              return Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(16)),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
-                      blurRadius: 10,
-                      offset: const Offset(0, -2),
+                      color: Colors.black26,
+                      blurRadius: 8,
+                      offset: Offset(0, -2),
                     ),
                   ],
                 ),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _selected!.name,
-                            style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                    // 상단 핸들바
+                    Container(
+                      margin: const EdgeInsets.only(top: 8, bottom: 8),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '이지팟 목록',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.grey),
-                          onPressed: () => setState(() => _selected = null),
-                        ),
-                      ],
+                      ),
                     ),
                     const SizedBox(height: 8),
-                    Text(
-                      _selected!.mission,
-                      style: TextStyle(color: Colors.grey[700], fontSize: 14),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '#${_selected!.category}',
-                      style: TextStyle(color: Colors.grey[600], fontSize: 13),
-                    ),
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: _openRoute,
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        backgroundColor: Colors.teal,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: const Text(
-                        "미션 시작 / 경로 안내 (준비중)",
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
+                    Expanded(
+                      child: ListView.builder(
+                        controller: scrollController,
+                        itemCount: _facilities.length,
+                        itemBuilder: (context, index) {
+                          final f = _facilities[index];
+                          final isFav = _favoriteIds.contains(f.id);
+
+                          return ListTile(
+                            onTap: () => _focusFacility(f),
+                            title: Text(
+                              f.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (f.mission.isNotEmpty)
+                                  Text(
+                                    f.mission,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '#${f.category}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey[600],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: Icon(
+                                    isFav
+                                        ? Icons.star
+                                        : Icons.star_border,
+                                    color: isFav
+                                        ? Colors.amber
+                                        : Colors.grey,
+                                  ),
+                                  onPressed: () => _toggleFavorite(f),  // 👈 여기!
+                                ),
+                                TextButton(
+                                  onPressed: () => _openMissionPage(f),
+                                  child: const Text('미션 시작'),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
                       ),
                     ),
                   ],
                 ),
-              ),
-            ),
+              );
+            },
+          ),
         ],
       ),
     );

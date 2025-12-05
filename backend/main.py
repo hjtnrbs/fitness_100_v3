@@ -30,17 +30,35 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 print("[DEBUG] SUPABASE_URL:", SUPABASE_URL)
 print("[DEBUG] SUPABASE_KEY 시작 10글자:", SUPABASE_SERVICE_ROLE_KEY[:10] if SUPABASE_SERVICE_ROLE_KEY else None)
 
+def _sb_json_headers(prefer_return: bool = False) -> Dict[str, str]:
+  """Supabase REST 호출용 공통 헤더"""
+  if not SUPABASE_SERVICE_ROLE_KEY:
+      raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY 가 설정되지 않았습니다.")
+  headers = {
+      "apikey": SUPABASE_SERVICE_ROLE_KEY,
+      "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+      "Content-Type": "application/json",
+  }
+  if prefer_return:
+      headers["Prefer"] = "return=representation"
+  return headers
+
+def _sb_table_url(table: str) -> str:
+  if not SUPABASE_URL:
+      raise RuntimeError("SUPABASE_URL 이 설정되지 않았습니다.")
+  return f"{SUPABASE_URL}/rest/v1/{table}"
+
 # =========================================
-# Naver Directions API 키
+# Naver Directions API 키 사용안함! 없어도 되는 부분
 # =========================================
-NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")      # X-NCP-APIGW-API-KEY-ID
 
 print("[DEBUG] NAVER_CLIENT_ID:", NAVER_CLIENT_ID)
-print("[DEBUG] NAVER_CLIENT_SECRET 시작 5글자:", NAVER_CLIENT_SECRET[:5] if NAVER_CLIENT_SECRET else None)
 
 
-
+# =========================================
+# Supabase insert / select 함수 (physical_age_assessments)
+# =========================================
 def insert_physical_age_assessment(row: dict) -> Optional[dict]:
     """
     Supabase physical_age_assessments 테이블에 1건 insert 후
@@ -52,12 +70,7 @@ def insert_physical_age_assessment(row: dict) -> Optional[dict]:
 
     try:
         url = f"{SUPABASE_URL}/rest/v1/physical_age_assessments"
-        headers = {
-            "apikey": SUPABASE_SERVICE_ROLE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-        }
+        headers = _sb_json_headers(prefer_return=True)
         resp = requests.post(url, headers=headers, json=row, timeout=5)
 
         if resp.status_code >= 400:
@@ -157,7 +170,6 @@ def quantile_to_grade(q: float) -> Dict[str, object]:
 def grade_index_to_lo_age_value(idx: int) -> int:
     """
     17등급 인덱스를 대략적인 '숫자 신체나이'로 매핑.
-    👉 필요하면 나중에 수가 직접 값들 조정해도 됨.
     """
     idx = max(0, min(idx, len(AGE_GRADES) - 1))
     mapping = {
@@ -322,31 +334,7 @@ def compute_physical_age_quantiles(req: PhysicalAgeRequest) -> Dict[str, float]:
 # =========================================
 # 4. 공공체육시설 Supabase + 근처 조회 로직
 # =========================================
-FACILITIES_TABLE = os.getenv("FACILITIES_TABLE", "facilities")  # 테이블명 다르면 .env에서 지정
-_fac_df: Optional[pd.DataFrame] = None
-
-
-# main.py (일부)
-
-from typing import Optional
-import pandas as pd
-import requests
-import os
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-_facilities_df: Optional[pd.DataFrame] = None
-
-
-from typing import Optional
-import os
-import requests
-import pandas as pd
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
+FACILITIES_TABLE = os.getenv("FACILITIES_TABLE", "facilities")
 _facilities_df: Optional[pd.DataFrame] = None
 
 
@@ -362,7 +350,7 @@ def load_facilities() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Supabase 환경변수가 설정되지 않았습니다.")
 
-    table_name = "facilities"
+    table_name = FACILITIES_TABLE
     base_url = f"{SUPABASE_URL}/rest/v1/{table_name}"
 
     common_headers = {
@@ -372,10 +360,9 @@ def load_facilities() -> pd.DataFrame:
         "Prefer": "count=exact",
     }
 
-    # 🔹 한 번에 1000개씩 가져오기
     page_size = 1000
     start = 0
-    frames: list[pd.DataFrame] = []
+    frames: List[pd.DataFrame] = []
 
     while True:
         end = start + page_size - 1
@@ -386,9 +373,10 @@ def load_facilities() -> pd.DataFrame:
         }
 
         params = {
-            # 실제 있는 컬럼만 선택
-            "select": "id,name,lat,lon,address,detail_equip,type,"
-                      "is_muscular_endurance,is_flexibility,is_cardio,quickness"
+            "select": (
+                "id,name,lat,lon,address,detail_equip,type,"
+                "is_muscular_endurance,is_flexibility,is_cardio,quickness"
+            )
         }
 
         resp = requests.get(base_url, headers=headers, params=params, timeout=30)
@@ -397,14 +385,12 @@ def load_facilities() -> pd.DataFrame:
         resp.raise_for_status()
         data = resp.json()
 
-        # 더 이상 데이터가 없으면 종료
         if not data:
             break
 
         df_page = pd.DataFrame(data)
         frames.append(df_page)
 
-        # 마지막 페이지면 종료
         if len(data) < page_size:
             break
 
@@ -415,7 +401,6 @@ def load_facilities() -> pd.DataFrame:
 
     df = pd.concat(frames, ignore_index=True)
 
-    # lat/lon 정리
     df = df.dropna(subset=["lat", "lon"])
     df["lat"] = df["lat"].astype(float)
     df["lon"] = df["lon"].astype(float)
@@ -423,7 +408,6 @@ def load_facilities() -> pd.DataFrame:
     print("[DEBUG] Supabase에서 시설 로딩 완료, 전체 시설 수:", len(df))
     _facilities_df = df
     return _facilities_df
-
 
 
 def haversine_km(lat1, lon1, lat2, lon2) -> float:
@@ -438,15 +422,15 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
 def infer_category(row) -> str:
     """
     facilities 테이블 기준 운동 카테고리 추론
-    - is_cardio      : 심폐지구력
-    - is_muscular_e  : 근지구력
-    - is_flexibility : 유연성
-    - quickness      : (선택) 순발력/기타
+    - is_cardio             : 심폐지구력
+    - is_muscular_endurance : 근지구력
+    - is_flexibility        : 유연성
+    - quickness             : (선택) 순발력/기타
     """
     if row.get("is_cardio", 0) == 1:
         return "심폐지구력"
 
-    if row.get("is_muscular_e", 0) == 1:
+    if row.get("is_muscular_endurance", 0) == 1:
         return "근지구력"
 
     if row.get("is_flexibility", 0) == 1:
@@ -520,12 +504,7 @@ def health_check():
 def predict_physical_age(req: PhysicalAgeRequest):
     """
     신체나이 17등급 예측 + Supabase insert 엔드포인트.
-    - 엔진(model.pkl)로 quantile 계산
-    - 평균 quantile → 17등급(grade_index, grade_label)
-    - grade_index → 대략적인 숫자 신체나이(lo_age_value)로 변환
-    - Supabase physical_age_assessments 에 insert
     """
-    # 1) quantile 계산
     try:
         q_dict = compute_physical_age_quantiles(req)
     except (KeyError, TypeError, FileNotFoundError) as e:
@@ -533,21 +512,18 @@ def predict_physical_age(req: PhysicalAgeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"예측 중 오류가 발생했습니다: {e}")
 
-    # 2) 평균 quantile → 등급
     q_values = list(q_dict.values())
     avg_q = float(np.mean(q_values))
     grade_info = quantile_to_grade(avg_q)
     grade_index = int(grade_info["grade_index"])
     grade_label = str(grade_info["grade_label"])
 
-    # 3) 숫자 신체나이, 퍼센타일, 취약 항목 계산
-    lo_age_value = grade_index_to_lo_age_value(grade_index)   # 예: 33
-    lo_age_tier_label = grade_label                           # 라벨은 그대로 사용
+    lo_age_value = grade_index_to_lo_age_value(grade_index)
+    lo_age_tier_label = grade_label
     tier_index = grade_index
     percentile = avg_q * 100.0
-    weak_point = min(q_dict.items(), key=lambda kv: kv[1])[0]  # quantile 가장 낮은 항목
+    weak_point = min(q_dict.items(), key=lambda kv: kv[1])[0]
 
-    # 4) Supabase insert (user_id 가 있을 때만)
     saved_row = None
     if req.user_id is not None:
         row = {
@@ -557,18 +533,12 @@ def predict_physical_age(req: PhysicalAgeRequest):
             "flexibility": req.flexibility,
             "jump_power": req.jump_power,
             "cardio_endurance": req.cardio_endurance,
-
-            # 숫자 신체나이 + 등급 정보
-            "lo_age_value": lo_age_value,              # int
-            "lo_age_tier_label": lo_age_tier_label,    # text
-            "tier_index": tier_index,                  # int4
-
-            # 지표들
-            "percentile": percentile,                  # numeric
-            "weak_point": weak_point,                  # text
-
-            # jsonb 컬럼에는 항목별 quantile dict 통째로 저장
-            "detail_quantiles": q_dict,                # jsonb
+            "lo_age_value": lo_age_value,
+            "lo_age_tier_label": lo_age_tier_label,
+            "tier_index": tier_index,
+            "percentile": percentile,
+            "weak_point": weak_point,
+            "detail_quantiles": q_dict,
         }
 
         saved_row = insert_physical_age_assessment(row)
@@ -577,7 +547,6 @@ def predict_physical_age(req: PhysicalAgeRequest):
     if isinstance(saved_row, dict) and "id" in saved_row:
         assessment_id = saved_row["id"]
 
-    # 5) 클라이언트 응답
     return PhysicalAgeResponse(
         lo_age_value=lo_age_value,
         lo_age_tier_label=lo_age_tier_label,
@@ -627,7 +596,6 @@ def get_latest_physical_age(user_id: str):
 def get_physical_age_history(user_id: str, limit: int = 20):
     """
     특정 사용자(user_id)의 최근 신체나이 측정 히스토리 조회.
-    limit 개수만큼 최근 측정 순으로 반환.
     """
     if limit <= 0:
         raise HTTPException(status_code=400, detail="limit 은 1 이상이어야 합니다.")
@@ -698,6 +666,7 @@ def get_near_facilities(lat: float, lon: float, radius_km: float = 2.0):
 
     return results
 
+
 @app.get("/route")
 def get_route(
     start_lat: float,
@@ -708,17 +677,18 @@ def get_route(
     """
     네이버 Driving Directions API 를 통해
     start -> end까지 도로 기반 경로를 받아와 polyline 좌표만 반환
+    (현재 앱에서는 실제 길찾기 UI는 사용하지 않고, 경로 polyline만 사용 가능)
     """
     if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="NAVER API 키가 설정되어 있지 않습니다.")
 
-    url = "https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving"
+    url = "https://maps.apigw.ntruss.com/map-direction/v1/driving"
 
     # 네이버는 "경도,위도" 순서!
     params = {
         "start": f"{start_lon},{start_lat}",
         "goal": f"{end_lon},{end_lat}",
-        "option": "traoptimal",  # 최적 경로
+        "option": "traoptimal",
     }
 
     headers = {
@@ -734,7 +704,6 @@ def get_route(
 
         data = res.json()
 
-        # 경로가 없을 수도 있으니 방어 코드
         routes = data.get("route", {}).get("traoptimal")
         if not routes:
             raise HTTPException(status_code=404, detail="경로를 찾을 수 없습니다.")
@@ -758,8 +727,6 @@ def recommend_facilities(
 ):
     """
     위치 + 취약영역(weak_point)을 기준으로 시설 추천.
-    - 반경 radius_km 이내 시설만 대상
-    - weak_point가 주어지면, 해당 카테고리와 맞는 시설을 상단에 정렬
     """
     try:
         df = load_facilities()
@@ -793,19 +760,195 @@ def recommend_facilities(
                 mission=mission,
                 category=category,
                 distance_km=round(d, 3),
-                match_category=match,
+                match_category=match
             )
         )
 
-    # 취약영역과 카테고리가 맞는 시설을 위로 정렬,
-    # 그 다음은 거리 순으로 정렬
     facilities.sort(key=lambda f: (not f.match_category, f.distance_km))
 
     return facilities
 
 
 # =========================================
-# 6. 로컬 실행용
+# 7. 이지팟 즐겨찾기 & 미션 완료 API
+# =========================================
+class FavoriteToggleRequest(BaseModel):
+    user_id: str          # auth.users.id (uuid)
+    facility_id: int      # facilities.id
+    is_favorite: bool     # true면 추가, false면 제거
+
+
+class MissionCompleteRequest(BaseModel):
+    user_id: str          # auth.users.id
+    facility_id: int      # facilities.id
+    mission_id: Optional[str] = None   # ✅ 없으면 None 으로 처리
+    status: str = "completed"          # "started" / "arrived" / "completed"
+    started_at: Optional[datetime] = None
+    arrived_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    is_favorite: bool = False          # 완료 시 즐겨찾기 표시 여부(선택)
+
+
+@app.post("/favorites/toggle")
+def toggle_favorite(req: FavoriteToggleRequest):
+    """
+    즐겨찾기 ON/OFF 토글
+    - is_favorite=True  → favorite_facilities 에 upsert(단순 insert, PK 충돌 시 무시)
+    - is_favorite=False → favorite_facilities 에서 delete
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 환경변수가 설정되지 않았습니다.")
+
+    table = "favorite_facilities"
+
+    if req.is_favorite:
+        # ✅ 즐겨찾기 추가
+        url = _sb_table_url(table)
+        payload = {
+            "user_id": req.user_id,
+            "facility_id": req.facility_id,
+        }
+        try:
+            r = requests.post(url, headers=_sb_json_headers(), json=payload, timeout=5)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"즐겨찾기 추가 요청 실패: {e}")
+
+        if r.status_code not in (200, 201, 204):
+            raise HTTPException(
+                status_code=500,
+                detail=f"즐겨찾기 추가 실패: {r.status_code} {r.text}",
+            )
+        return {"status": "ok", "is_favorite": True}
+
+    else:
+        # ❌ 즐겨찾기 해제
+        url = (
+            _sb_table_url(table)
+            + f"?user_id=eq.{req.user_id}&facility_id=eq.{req.facility_id}"
+        )
+        try:
+            r = requests.delete(url, headers=_sb_json_headers(), timeout=5)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"즐겨찾기 삭제 요청 실패: {e}")
+
+        if r.status_code not in (200, 204):
+            raise HTTPException(
+                status_code=500,
+                detail=f"즐겨찾기 삭제 실패: {r.status_code} {r.text}",
+            )
+        return {"status": "ok", "is_favorite": False}
+
+
+@app.get("/favorites/by-user", response_model=List[FacilityOut])
+def get_favorite_facilities(user_id: str):
+    """
+    특정 유저의 즐겨찾기 이지팟 리스트
+    - favorite_facilities(user_id, facility_id) + facilities 캐시 DataFrame 활용
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 환경변수가 설정되지 않았습니다.")
+
+    # 1) favorite_facilities 에서 facility_id 리스트 조회
+    fav_url = (
+        _sb_table_url("favorite_facilities")
+        + f"?user_id=eq.{user_id}&select=facility_id"
+    )
+    try:
+        r = requests.get(fav_url, headers=_sb_json_headers(), timeout=5)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"즐겨찾기 조회 실패: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=f"즐겨찾기 조회 실패: {r.status_code} {r.text}",
+        )
+
+    rows = r.json()
+    facility_ids = [row["facility_id"] for row in rows]
+    if not facility_ids:
+        return []
+
+    # 2) 캐시된 facilities DataFrame 에서 해당 id들만 필터링
+    try:
+        df = load_facilities()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    df_sel = df[df["id"].isin(facility_ids)]
+
+    results: List[FacilityOut] = []
+    for _, row in df_sel.iterrows():
+        category = infer_category(row)
+        equip = row.get("detail_equip", "")
+        mission = str(equip) if (isinstance(equip, str) and equip.strip() != "") else f"{category} 운동"
+        results.append(
+            FacilityOut(
+                id=int(row["id"]),
+                name=str(row["name"]),
+                lat=float(row["lat"]),
+                lon=float(row["lon"]),
+                address=str(row["address"]),
+                mission=mission,
+                category=category,
+            )
+        )
+
+    return results
+
+
+@app.post("/mission/complete")
+def complete_mission(req: MissionCompleteRequest):
+    """
+    미션 완료(또는 진행 상태) 기록 저장용 엔드포인트
+    - mission_logs 테이블에 1행 insert
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase 환경변수가 설정되지 않았습니다.")
+
+    url = _sb_table_url("mission_logs")
+
+    # ✅ mission_id 는 일단 빼고 기본 필드만 넣기
+    payload = {
+        "user_id": req.user_id,
+        "facility_id": req.facility_id,
+        "status": req.status,
+        "is_favorite": req.is_favorite,
+    }
+
+    # ✅ mission_id 가 넘어온 경우에만 넣기
+    if req.mission_id is not None:
+        payload["mission_id"] = req.mission_id
+
+    if req.started_at is not None:
+        payload["started_at"] = req.started_at.isoformat()
+    if req.arrived_at is not None:
+        payload["arrived_at"] = req.arrived_at.isoformat()
+    if req.completed_at is not None:
+        payload["completed_at"] = req.completed_at.isoformat()
+
+    try:
+        r = requests.post(
+            url,
+            headers=_sb_json_headers(prefer_return=True),
+            json=payload,
+            timeout=5,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"미션 로그 저장 요청 실패: {e}")
+
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=500,
+            detail=f"미션 로그 저장 실패: {r.status_code} {r.text}",
+        )
+
+    return {"status": "ok", "data": r.json()}
+
+
+
+# =========================================
+# 8. 로컬 실행용
 # =========================================
 if __name__ == "__main__":
     import uvicorn

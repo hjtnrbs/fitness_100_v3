@@ -7,6 +7,8 @@ import 'screens/splash_screen.dart';
 import 'screens/login_page.dart';
 import 'screens/signup_page.dart';
 import 'screens/home_page.dart';
+import 'screens/map_screen.dart';
+
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -54,6 +56,7 @@ class LowAgeApp extends StatelessWidget {
         '/login': (context) => const LoginPage(),
         '/signup': (context) => const SignupPage(),
         '/home': (context) => const HomePage(),
+        '/map': (context) => const MapScreen(),   // ⭐ 이것만 추가!
       },
     );
   }
